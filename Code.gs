@@ -1,0 +1,312 @@
+// ═══════════════════════════════════════════════
+// SALEFISHER OPS SCRIPTS — CONFIG
+// Edit the values below. Do not change anything else
+// unless you know what you're doing.
+// ═══════════════════════════════════════════════
+
+var CONFIG = {
+
+  // Your ops team email — all alerts go here
+  OPS_EMAIL: 'post2den@gmail.com',
+
+  // The SaleFisher API health endpoint
+  // Once the backend is deployed, replace with the real URL
+  // e.g. 'https://salefisher-api.fly.dev/health'
+  API_HEALTH_URL: 'https://salefisher-api.fly.dev/health',
+
+  // How many days before an unpaid invoice triggers an alert
+  INVOICE_ALERT_DAYS: 3,
+
+  // Sheet tab names — must match exactly what you named them
+  SHEETS: {
+    RETAILERS: 'RETAILERS',
+    ORDERS:    'ORDERS',
+    FINANCE:   'FINANCE',
+    STRIKES:   'STRIKES',
+    PRODUCTS:  'PRODUCTS'
+  },
+
+  // Column positions in RETAILERS tab (1 = column A)
+  RETAILER_COLS: {
+    ID:           1,  // A
+    NAME:         2,  // B
+    EMAIL:        3,  // C
+    STATUS:       4,  // D — Active / Suspended / Banned
+    STRIKE_COUNT: 5   // E
+  },
+
+  // Column positions in STRIKES tab (1 = column A)
+  STRIKE_COLS: {
+    STRIKE_ID:    1,  // A
+    RETAILER_ID:  2,  // B
+    RETAILER_NAME:3,  // C
+    DATE:         4,  // D
+    REASON:       5,  // E
+    STRIKE_LEVEL: 6,  // F — 1, 2, or 3
+    ISSUED_BY:    7   // G
+  },
+
+  // Column positions in FINANCE tab (1 = column A)
+  FINANCE_COLS: {
+    INVOICE_ID:       1,  // A
+    RETAILER_ID:      2,  // B
+    RETAILER_NAME:    3,  // C
+    PERIOD:           4,  // D — e.g. "2026-05"
+    GROSS_SALES:      5,  // E
+    COMMISSION_RATE:  6,  // F — e.g. 0.08 for 8%
+    COMMISSION_AMOUNT:7,  // G
+    REFUNDS_DEDUCTED: 8,  // H
+    NET_PAYABLE:      9,  // I
+    PAYMENT_STATUS:   10, // J — Unpaid / Paid / Overdue
+    CREATED_AT:       11  // K
+  }
+};
+
+// =================================
+// onStrikeAdded
+// =================================
+
+function onStrikeAdded(e) {
+
+  var ss           = SpreadsheetApp.getActiveSpreadsheet();
+  var activeSheet  = ss.getActiveSheet();
+
+  // Only run if the edit happened on the STRIKES tab
+  if (activeSheet.getName() !== CONFIG.SHEETS.STRIKES) return;
+
+  var strikesSheet   = ss.getSheetByName(CONFIG.SHEETS.STRIKES);
+  var retailersSheet = ss.getSheetByName(CONFIG.SHEETS.RETAILERS);
+
+  // Get the last row that was just added on STRIKES
+  var lastRow     = strikesSheet.getLastRow();
+  var newStrikeRow = strikesSheet.getRange(lastRow, 1, 1, 7).getValues()[0];
+
+  var retailerId   = newStrikeRow[CONFIG.STRIKE_COLS.RETAILER_ID  - 1];
+  var retailerName = newStrikeRow[CONFIG.STRIKE_COLS.RETAILER_NAME- 1];
+  var reason       = newStrikeRow[CONFIG.STRIKE_COLS.REASON       - 1];
+  var strikeLevel  = newStrikeRow[CONFIG.STRIKE_COLS.STRIKE_LEVEL - 1];
+
+  // Safety check — if row is empty, stop
+  if (!retailerId) return;
+
+  // Count all strikes for this retailer across the whole STRIKES tab
+  var allStrikes   = strikesSheet.getDataRange().getValues();
+  var strikeCount  = 0;
+
+  for (var i = 1; i < allStrikes.length; i++) { // start at 1 to skip header row
+    if (allStrikes[i][CONFIG.STRIKE_COLS.RETAILER_ID - 1] == retailerId) {
+      strikeCount++;
+    }
+  }
+
+  // Find the retailer in RETAILERS tab and update their strike count
+  var retailerData = retailersSheet.getDataRange().getValues();
+  var retailerRow  = -1;
+
+  for (var j = 1; j < retailerData.length; j++) {
+    if (retailerData[j][CONFIG.RETAILER_COLS.ID - 1] == retailerId) {
+      retailerRow = j + 1; // +1 because getValues is 0-indexed, sheet rows are 1-indexed
+      break;
+    }
+  }
+
+  if (retailerRow === -1) {
+    Logger.log('onStrikeAdded: retailer_id ' + retailerId + ' not found in RETAILERS tab');
+    return;
+  }
+
+  // Write the updated strike count back to RETAILERS tab
+  retailersSheet
+    .getRange(retailerRow, CONFIG.RETAILER_COLS.STRIKE_COUNT)
+    .setValue(strikeCount);
+
+  // If 3 strikes — auto-suspend
+  if (strikeCount >= 3) {
+    retailersSheet
+      .getRange(retailerRow, CONFIG.RETAILER_COLS.STATUS)
+      .setValue('Suspended');
+
+    GmailApp.sendEmail(
+      CONFIG.OPS_EMAIL,
+      '⚠ SUSPENDED: ' + retailerName + ' has reached 3 strikes',
+      'Retailer: ' + retailerName + '\n'
+      + 'Retailer ID: ' + retailerId + '\n'
+      + 'Strike level: ' + strikeLevel + '\n'
+      + 'Reason: ' + reason + '\n'
+      + 'Total strikes: ' + strikeCount + '\n\n'
+      + 'Status has been automatically set to SUSPENDED.\n'
+      + 'To ban this retailer, manually set status to Banned in the RETAILERS tab.'
+    );
+
+    Logger.log('SUSPENDED: ' + retailerName + ' — 3 strikes reached');
+
+  } else {
+    // Strike 1 or 2 — log it, email as FYI
+    GmailApp.sendEmail(
+      CONFIG.OPS_EMAIL,
+      'Strike ' + strikeCount + ' issued: ' + retailerName,
+      'Retailer: ' + retailerName + '\n'
+      + 'Retailer ID: ' + retailerId + '\n'
+      + 'Strike level: ' + strikeLevel + '\n'
+      + 'Reason: ' + reason + '\n'
+      + 'Total strikes so far: ' + strikeCount + ' / 3'
+    );
+
+    Logger.log('Strike ' + strikeCount + ' logged for ' + retailerName);
+  }
+}
+
+
+// =================================
+// onRetailerStatusChange()
+// =================================
+
+
+function onRetailerStatusChange(e) {
+
+  // e.range = the cell that was just edited
+  var range       = e.range;
+  var sheetName   = range.getSheet().getName();
+  var editedCol   = range.getColumn();
+  var editedRow   = range.getRow();
+
+  // Only run if edit was on RETAILERS tab, STATUS column, and not header row
+  if (sheetName  !== CONFIG.SHEETS.RETAILERS)         return;
+  if (editedCol  !== CONFIG.RETAILER_COLS.STATUS)     return;
+  if (editedRow  === 1)                                   return; // skip header
+
+  var ss             = SpreadsheetApp.getActiveSpreadsheet();
+  var retailersSheet = ss.getSheetByName(CONFIG.SHEETS.RETAILERS);
+
+  var newStatus    = range.getValue();
+  var retailerName = retailersSheet
+    .getRange(editedRow, CONFIG.RETAILER_COLS.NAME)
+    .getValue();
+  var retailerId   = retailersSheet
+    .getRange(editedRow, CONFIG.RETAILER_COLS.ID)
+    .getValue();
+
+  // Build subject line based on severity
+  var subject = 'Status change: ' + retailerName + ' → ' + newStatus;
+  if (newStatus === 'Banned')     subject = '🚫 BANNED: '     + retailerName;
+  if (newStatus === 'Suspended') subject = '⚠ SUSPENDED: ' + retailerName;
+  if (newStatus === 'Active')    subject = '✓ REACTIVATED: ' + retailerName;
+
+  GmailApp.sendEmail(
+    CONFIG.OPS_EMAIL,
+    subject,
+    'Retailer: '   + retailerName  + '\n'
+    + 'ID: '         + retailerId    + '\n'
+    + 'New status: ' + newStatus     + '\n'
+    + 'Changed at: ' + new Date().toString() + '\n\n'
+    + 'This is an automated audit log from SaleFisher Ops.'
+  );
+
+  Logger.log('Status change logged: ' + retailerName + ' → ' + newStatus);
+}
+
+
+// =================================
+// generateInvoiceAlert()
+// =================================
+
+
+function generateInvoiceAlert() {
+
+  var ss           = SpreadsheetApp.getActiveSpreadsheet();
+  var financeSheet = ss.getSheetByName(CONFIG.SHEETS.FINANCE);
+  var allRows      = financeSheet.getDataRange().getValues();
+
+  var today        = new Date();
+  var overdueList  = [];
+  var fc           = CONFIG.FINANCE_COLS;
+
+  // Start at row 1 to skip the header row
+  for (var i = 1; i < allRows.length; i++) {
+    var row           = allRows[i];
+    var paymentStatus = row[fc.PAYMENT_STATUS - 1];
+    var createdAt     = new Date(row[fc.CREATED_AT - 1]);
+
+    // Skip if paid, or if the created_at date is not a valid date
+    if (paymentStatus === 'Paid') continue;
+    if (isNaN(createdAt))          continue;
+
+    var daysSinceCreated = (today - createdAt) / (1000 * 60 * 60 * 24);
+
+    if (daysSinceCreated >= CONFIG.INVOICE_ALERT_DAYS) {
+      overdueList.push(
+        'Retailer: '    + row[fc.RETAILER_NAME   - 1] + '\n'
+        + 'Invoice ID: '  + row[fc.INVOICE_ID     - 1] + '\n'
+        + 'Period: '      + row[fc.PERIOD         - 1] + '\n'
+        + 'Net Payable: £'+ row[fc.NET_PAYABLE     - 1] + '\n'
+        + 'Status: '      + paymentStatus                   + '\n'
+        + 'Days overdue: '+ Math.floor(daysSinceCreated)      + '\n'
+        + '───────────────────'
+      );
+    }
+  }
+
+  // Only send an email if there are overdue invoices
+  if (overdueList.length === 0) {
+    Logger.log('generateInvoiceAlert: no overdue invoices. All good.');
+    return;
+  }
+
+  GmailApp.sendEmail(
+    CONFIG.OPS_EMAIL,
+    '💰 ' + overdueList.length + ' overdue invoice(s) need chasing — SaleFisher',
+    'The following invoices are unpaid and overdue:\n\n'
+    + overdueList.join('\n')
+    + '\n\nGo to the FINANCE tab to update payment status once paid.'
+  );
+
+  Logger.log('generateInvoiceAlert: ' + overdueList.length + ' overdue invoices emailed.');
+}
+
+
+// =================================
+// dailyHealthCheck()
+// =================================
+
+function dailyHealthCheck() {
+
+  var url         = CONFIG.API_HEALTH_URL;
+  var statusCode  = 0;
+  var errorMsg    = '';
+
+  try {
+    var response   = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true  // prevents script crash on 500 errors
+    });
+    statusCode = response.getResponseCode();
+
+  } catch (err) {
+    // Request failed entirely — DNS error, timeout, Fly.io down
+    statusCode = 0;
+    errorMsg   = err.toString();
+  }
+
+  if (statusCode === 200) {
+    Logger.log('dailyHealthCheck: API is healthy. Status 200. ✓');
+    return; // all good — no email needed
+  }
+
+  // Something is wrong — send alert
+  var body = statusCode === 0
+    ? 'The API did not respond at all.\n\nError: ' + errorMsg
+    : 'The API responded with status ' + statusCode + ' (expected 200).';
+
+  GmailApp.sendEmail(
+    CONFIG.OPS_EMAIL,
+    '🚨 SaleFisher API is DOWN — health check failed',
+    'Daily health check ran at: ' + new Date().toString() + '\n\n'
+    + body + '\n\n'
+    + 'URL checked: ' + url + '\n\n'
+    + 'Check Fly.io dashboard: https://fly.io/apps/salefisher-api\n'
+    + 'Check error logs and restart the machine if needed.'
+  );
+
+  Logger.log('dailyHealthCheck: ALERT sent. Status: ' + statusCode);
+}
+
+
